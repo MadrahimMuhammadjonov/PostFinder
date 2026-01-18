@@ -3,8 +3,7 @@ import sqlite3
 import logging
 import html
 import re
-import os
-from telethon import TelegramClient, events, functions, errors
+from telethon import TelegramClient, events, functions
 from telethon.sessions import StringSession
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -24,196 +23,187 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-# --- MA'LUMOTLAR BAZASI (QOTISHNI OLDINI OLISH UCHUN OPTIMALLASHGAN) ---
-def get_db_connection():
-    conn = sqlite3.connect('bot_data.db', check_same_thread=False, timeout=20)
-    conn.execute('PRAGMA journal_mode=WAL') # Multi-user rejimini yaxshilaydi
-    return conn
-
-def init_db():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('CREATE TABLE IF NOT EXISTS keywords (id INTEGER PRIMARY KEY, keyword TEXT UNIQUE)')
-    c.execute('CREATE TABLE IF NOT EXISTS search_groups (id INTEGER PRIMARY KEY, group_id INTEGER UNIQUE, group_name TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS user_state (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT)')
-    conn.commit()
-    conn.close()
-
-def db_query(query, params=(), fetch=False):
-    conn = get_db_connection()
-    c = conn.cursor()
-    try:
-        c.execute(query, params)
+# --- DB OPERATSIYALARI (MULTI-ADMIN UCHUN OPTIMALLASHGAN) ---
+def db_op(query, params=(), fetch=False):
+    # check_same_thread=False va timeout orqali qotishlar oldi olingan
+    with sqlite3.connect('bot_data.db', timeout=30, check_same_thread=False) as conn:
+        conn.execute('PRAGMA journal_mode=WAL')
+        cursor = conn.cursor()
+        cursor.execute(query, params)
         if fetch:
-            res = c.fetchall()
-            return res
+            return cursor.fetchall()
         conn.commit()
-    finally:
-        conn.close()
     return None
 
-# --- KLAVIATURALAR ---
-def main_menu():
+def init_db():
+    db_op('CREATE TABLE IF NOT EXISTS keywords (id INTEGER PRIMARY KEY, keyword TEXT UNIQUE)')
+    db_op('CREATE TABLE IF NOT EXISTS search_groups (id INTEGER PRIMARY KEY, group_id INTEGER UNIQUE, group_name TEXT)')
+    db_op('CREATE TABLE IF NOT EXISTS user_state (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT)')
+
+# --- ASOSIY MENYU ---
+def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔑 Kalit so'zlar", callback_data='menu_kw')],
-        [InlineKeyboardButton(text="📡 Izlovchi guruhlar", callback_data='menu_gr')],
-        [InlineKeyboardButton(text="⚙️ Tizim holati", callback_data='check_status')]
+        [InlineKeyboardButton(text="🔑 Kalit so'zlar", callback_data='open_keywords')],
+        [InlineKeyboardButton(text="📡 Izlovchi guruhlar", callback_data='open_groups')],
+        [InlineKeyboardButton(text="⚙️ Tizim holati", callback_data='sys_status')]
     ])
 
-def sub_menu(prefix):
-    # prefix: 'kw' (kalit so'z) yoki 'gr' (guruh)
+# --- SUB MENYULAR (PREFIX FARQLANGAN) ---
+def sub_kb(mode):
+    # mode faqat 'kw' yoki 'gr' bo'lishi mumkin
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Qo'shish", callback_data=f'add_{prefix}')],
-        [InlineKeyboardButton(text="📋 Ro'yxat", callback_data=f'view_{prefix}')],
-        [InlineKeyboardButton(text="🗑 O'chirish", callback_data=f'del_list_{prefix}')],
-        [InlineKeyboardButton(text="🔙 Orqaga", callback_data='back_to_main')]
+        [InlineKeyboardButton(text="➕ Qo'shish", callback_data=f'add_new_{mode}')],
+        [InlineKeyboardButton(text="📋 Ro'yxat", callback_data=f'view_all_{mode}')],
+        [InlineKeyboardButton(text="🗑 O'chirish", callback_data=f'list_del_{mode}')],
+        [InlineKeyboardButton(text="🔙 Orqaga", callback_data='main_home')]
     ])
 
-# --- USERBOT LOGIKASI ---
+# --- USERBOT ---
 @client.on(events.NewMessage)
-async def handle_new_message(event):
+async def watcher(event):
     try:
-        s_groups = [g[0] for g in db_query("SELECT group_id FROM search_groups", fetch=True)]
-        if event.chat_id not in s_groups: return
-        keywords = [k[0] for k in db_query("SELECT keyword FROM keywords", fetch=True)]
+        groups = [g[0] for g in db_op("SELECT group_id FROM search_groups", fetch=True)]
+        if event.chat_id not in groups: return
+        
+        words = [k[0] for k in db_op("SELECT keyword FROM keywords", fetch=True)]
         text = event.message.message
         if not text: return
-        found = [kw for kw in keywords if kw.lower() in text.lower()]
+        
+        found = [w for w in words if w.lower() in text.lower()]
         if found:
             sender = await event.get_sender()
             chat = await event.get_chat()
-            p_url = f"https://t.me/{sender.username}" if getattr(sender, 'username', None) else f"tg://user?id={sender.id}"
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👤 Profil", url=p_url)]])
-            report = (f"🔍 <b>Topildi:</b> {', '.join(found)}\n"
-                      f"<b>📍 Guruh:</b> {html.escape(getattr(chat, 'title', 'Guruh'))}\n\n"
-                      f"<b>📝 Xabar:</b>\n<i>{html.escape(text[:800])}</i>")
-            await bot.send_message(chat_id=PERSONAL_GROUP_ID, text=report, reply_markup=kb, parse_mode="HTML")
+            p_link = f"https://t.me/{sender.username}" if getattr(sender, 'username', None) else f"tg://user?id={sender.id}"
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👤 Profil", url=p_link)]])
+            msg = (f"🔍 <b>Topildi:</b> {', '.join(found)}\n"
+                   f"<b>📍 Guruh:</b> {html.escape(getattr(chat, 'title', 'Guruh'))}\n\n"
+                   f"<b>📝 Xabar:</b>\n<i>{html.escape(text[:800])}</i>")
+            await bot.send_message(PERSONAL_GROUP_ID, msg, reply_markup=kb, parse_mode="HTML")
     except: pass
 
-# --- ADMIN PANEL HANDLERLARI ---
+# --- HANDLERLAR ---
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    if message.from_user.id in ADMIN_LIST:
-        await message.answer("🤖 <b>Asosiy boshqaruv menyusi:</b>", reply_markup=main_menu(), parse_mode="HTML")
+async def start(m: types.Message):
+    if m.from_user.id in ADMIN_LIST:
+        await m.answer("🤖 <b>Boshqaruv paneli:</b>", reply_markup=main_kb(), parse_mode="HTML")
 
-@dp.callback_query(F.data == "back_to_main")
-async def back_to_main(callback: types.CallbackQuery):
-    db_query("DELETE FROM user_state WHERE user_id=?", (callback.from_user.id,))
-    await callback.message.edit_text("🤖 <b>Asosiy boshqaruv menyusi:</b>", reply_markup=main_menu(), parse_mode="HTML")
+@dp.callback_query(F.data == "main_home")
+async def go_home(c: types.CallbackQuery):
+    db_op("DELETE FROM user_state WHERE user_id=?", (c.from_user.id,))
+    await c.message.edit_text("🤖 <b>Boshqaruv paneli:</b>", reply_markup=main_kb(), parse_mode="HTML")
 
-@dp.callback_query(F.data.in_({"menu_kw", "menu_gr"}))
-async def show_sub_menus(callback: types.CallbackQuery):
-    pref = "kw" if callback.data == "menu_kw" else "gr"
-    title = "Kalit so'zlar" if pref == "kw" else "Guruhlar"
-    await callback.message.edit_text(f"<b>{title} bo'limi:</b>", reply_markup=sub_menu(pref), parse_mode="HTML")
+@dp.callback_query(F.data.in_({"open_keywords", "open_groups"}))
+async def sub_menu_handler(c: types.CallbackQuery):
+    mode = "kw" if c.data == "open_keywords" else "gr"
+    title = "🔑 Kalit so'zlar" if mode == "kw" else "📡 Izlovchi guruhlar"
+    await c.message.edit_text(f"<b>{title} bo'limi:</b>", reply_markup=sub_kb(mode), parse_mode="HTML")
 
-# --- O'CHIRISH LOGIKASI (TAYYOR VA XATOSIZ) ---
-@dp.callback_query(F.data.startswith("del_list_"))
-async def delete_list_menu(callback: types.CallbackQuery, force_pref=None):
-    pref = force_pref if force_pref else callback.data.split("_")[2]
+# --- O'CHIRISH (XATOLIK TUZATILGAN JOY) ---
+@dp.callback_query(F.data.startswith("list_del_"))
+async def del_list(c: types.CallbackQuery, force_mode=None):
+    mode = force_mode if force_mode else c.data.split("_")[2]
     
-    if pref == "kw":
-        data = db_query("SELECT id, keyword FROM keywords", fetch=True)
-        text = "🗑 <b>O'chirmoqchi bo'lgan kalit so'zni tanlang:</b>"
+    if mode == "kw":
+        data = db_op("SELECT id, keyword FROM keywords", fetch=True)
+        txt = "🗑 <b>Kalit so'zni tanlang:</b>"
     else:
-        data = db_query("SELECT id, group_name FROM search_groups", fetch=True)
-        text = "🗑 <b>O'chirmoqchi bo'lgan guruhni tanlang:</b>"
+        data = db_op("SELECT id, group_name FROM search_groups", fetch=True)
+        txt = "🗑 <b>Guruhni tanlang:</b>"
 
-    kb = []
-    if data:
-        for item in data:
-            kb.append([InlineKeyboardButton(text=f"❌ {item[1]}", callback_data=f"do_del_{pref}_{item[0]}")])
+    kb_list = []
+    for item in data:
+        # Callback ma'lumotlari qat'iy ajratildi: do_del_kw_ID yoki do_del_gr_ID
+        kb_list.append([InlineKeyboardButton(text=f"❌ {item[1]}", callback_data=f"do_del_{mode}_{item[0]}")])
     
-    kb.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data=f"menu_{pref}")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+    kb_list.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data=f'open_{"keywords" if mode=="kw" else "groups"}')])
+    await c.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list), parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("do_del_"))
-async def execute_delete(callback: types.CallbackQuery):
-    parts = callback.data.split("_")
-    pref = parts[2] # 'kw' yoki 'gr'
-    item_id = parts[3]
+async def delete_action(c: types.CallbackQuery):
+    parts = c.data.split("_")
+    mode = parts[2] # kw yoki gr
+    idx = parts[3] # ID
 
-    if pref == "kw":
-        db_query("DELETE FROM keywords WHERE id=?", (item_id,))
-        await callback.answer("✅ Kalit so'z o'chirildi")
+    if mode == "kw":
+        db_op("DELETE FROM keywords WHERE id=?", (idx,))
+        await c.answer("✅ Kalit so'z o'chirildi")
     else:
-        res = db_query("SELECT group_id FROM search_groups WHERE id=?", (item_id,), fetch=True)
+        res = db_op("SELECT group_id FROM search_groups WHERE id=?", (idx,), fetch=True)
         if res:
             try: await client(functions.channels.LeaveChannelRequest(channel=res[0][0]))
             except: pass
-        db_query("DELETE FROM search_groups WHERE id=?", (item_id,))
-        await callback.answer("✅ Guruh o'chirildi")
+        db_op("DELETE FROM search_groups WHERE id=?", (idx,))
+        await c.answer("✅ Guruh o'chirildi")
     
-    # Qayta o'sha list menyusiga qaytish
-    await delete_list_menu(callback, force_pref=pref)
+    # MUHIM: O'chirilgandan keyin o'sha mode'da qolish
+    await del_list(c, force_mode=mode)
 
-# --- QO'SHISH (KETMA-KET VA YAKUNLASH) ---
-@dp.callback_query(F.data.startswith("add_"))
-async def add_entry_start(callback: types.CallbackQuery):
-    pref = callback.data.split("_")[1]
-    db_query("REPLACE INTO user_state VALUES (?, ?, ?)", (callback.from_user.id, f"wait_{pref}", ""))
+# --- QO'SHISH (KETMA-KETLIK VA YAKUNLASH) ---
+@dp.callback_query(F.data.startswith("add_new_"))
+async def start_add(c: types.CallbackQuery):
+    mode = c.data.split("_")[2]
+    db_op("REPLACE INTO user_state VALUES (?, ?, ?)", (c.from_user.id, f"wait_{mode}", ""))
     
-    txt = "📝 <b>Kalit so'zlarni yuboring:</b> (Vergul bilan yoki bittalab)" if pref == "kw" else \
-          "📡 <b>Guruh havolasini yuboring:</b> (@guruh yoki link)"
+    txt = "📝 Kalit so'zlarni yuboring (vergul bilan yoki bittalab):" if mode == "kw" else \
+          "📡 Guruh linkini yuboring (Masalan: @guruh):"
     
-    await callback.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Yakunlash", callback_data=f'menu_{pref}')]
-    ]), parse_mode="HTML")
+    await c.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Yakunlash", callback_data=f'open_{"keywords" if mode=="kw" else "groups"}')]
+    ]))
 
 @dp.message(F.text)
-async def handle_admin_inputs(message: types.Message):
-    if message.from_user.id not in ADMIN_LIST: return
-    state_res = db_query("SELECT state FROM user_state WHERE user_id=?", (message.from_user.id,), fetch=True)
-    if not state_res: return
-    state = state_res[0][0]
-
-    if state == "wait_kw":
-        words = [w.strip() for w in message.text.split(",") if w.strip()]
-        for w in words: db_query("INSERT OR IGNORE INTO keywords (keyword) VALUES (?)", (w,))
-        await message.answer(f"✅ {len(words)} ta so'z qo'shildi. Yana yuboring yoki 'Yakunlash' tugmasini bosing.",
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Yakunlash", callback_data='menu_kw')]]))
-
-    elif state == "wait_gr":
-        links = re.findall(r'(?:https?://)?t\.me/[a-zA-Z0-9_]{4,}|@[a-zA-Z0-9_]{4,}', message.text)
-        if not links: return await message.answer("❌ Havola topilmadi. Qayta yuboring.")
+async def text_handler(m: types.Message):
+    if m.from_user.id not in ADMIN_LIST: return
+    state = db_op("SELECT state FROM user_state WHERE user_id=?", (m.from_user.id,), fetch=True)
+    if not state: return
+    
+    st = state[0][0]
+    if st == "wait_kw":
+        ws = [w.strip() for w in m.text.split(",") if w.strip()]
+        for w in ws: db_op("INSERT OR IGNORE INTO keywords (keyword) VALUES (?)", (w,))
+        await m.answer(f"✅ {len(ws)} ta so'z qo'shildi. Yana yuboring yoki 'Yakunlash'ni bosing.",
+                       reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Yakunlash", callback_data='open_keywords')]]))
+    
+    elif st == "wait_gr":
+        links = re.findall(r'(?:https?://)?t\.me/[a-zA-Z0-9_]{4,}|@[a-zA-Z0-9_]{4,}', m.text)
+        if not links: return await m.answer("❌ Havola xato.")
         
-        status = await message.answer("⏳ Ulanmoqda...")
-        success = 0
-        for link in links:
+        status = await m.answer("⏳ Ulanmoqda...")
+        ok = 0
+        for l in links:
             try:
-                clean = re.sub(r'/\d+$', '', link.strip().replace("https://t.me/", "").replace("@", ""))
-                entity = await client.get_entity(clean)
-                await client(functions.channels.JoinChannelRequest(channel=entity))
-                eid = entity.id if str(entity.id).startswith("-100") else int(f"-100{entity.id}")
-                db_query("INSERT OR IGNORE INTO search_groups (group_id, group_name) VALUES (?, ?)", (eid, entity.title))
-                success += 1
+                clean = re.sub(r'/\d+$', '', l.strip().replace("https://t.me/", "").replace("@", ""))
+                ent = await client.get_entity(clean)
+                await client(functions.channels.JoinChannelRequest(channel=ent))
+                gid = ent.id if str(ent.id).startswith("-100") else int(f"-100{ent.id}")
+                db_op("INSERT OR IGNORE INTO search_groups (group_id, group_name) VALUES (?, ?)", (gid, ent.title))
+                ok += 1
                 await asyncio.sleep(1)
             except: pass
             
-        await status.edit_text(f"✅ {success} ta guruh qo'shildi.\nNavbatdagi havolani yuboring:",
-                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Yakunlash", callback_data='menu_gr')]]))
+        await status.edit_text(f"✅ {ok} ta guruh ulandi.\nKeyingisini yuboring yoki 'Yakunlash'ni bosing:",
+                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Yakunlash", callback_data='open_groups')]]))
 
 # --- KO'RISH VA STATUS ---
-@dp.callback_query(F.data.startswith("view_"))
-async def view_entries(callback: types.CallbackQuery):
-    pref = callback.data.split("_")[1]
-    table = "keywords" if pref == "kw" else "search_groups"
-    col = "keyword" if pref == "kw" else "group_name"
-    data = db_query(f"SELECT {col} FROM {table}", fetch=True)
+@dp.callback_query(F.data.startswith("view_all_"))
+async def show_list(c: types.CallbackQuery):
+    mode = c.data.split("_")[2]
+    table = "keywords" if mode == "kw" else "search_groups"
+    col = "keyword" if mode == "kw" else "group_name"
+    data = db_op(f"SELECT {col} FROM {table}", fetch=True)
     txt = f"📋 <b>Ro'yxat:</b>\n\n" + ("\n".join([f"• {k[0]}" for k in data]) if data else "Bo'sh")
-    await callback.message.edit_text(txt[:4000], reply_markup=sub_menu(pref), parse_mode="HTML")
+    await c.message.edit_text(txt[:4000], reply_markup=sub_kb(mode), parse_mode="HTML")
 
-@dp.callback_query(F.data == "check_status")
-async def check_status(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "sys_status")
+async def sys_status(c: types.CallbackQuery):
     try:
         me = await client.get_me()
-        k_count = db_query("SELECT COUNT(*) FROM keywords", fetch=True)[0][0]
-        g_count = db_query("SELECT COUNT(*) FROM search_groups", fetch=True)[0][0]
-        txt = f"⚙️ <b>Holat:</b>\n👤 Userbot: @{me.username}\n🔑 So'zlar: {k_count}\n📡 Guruhlar: {g_count}"
-        await callback.message.edit_text(txt, reply_markup=main_menu(), parse_mode="HTML")
-    except: await callback.answer("Userbot faol emas!")
+        k = db_op("SELECT COUNT(*) FROM keywords", fetch=True)[0][0]
+        g = db_op("SELECT COUNT(*) FROM search_groups", fetch=True)[0][0]
+        txt = f"⚙️ <b>Tizim:</b>\n👤 Userbot: @{me.username}\n🔑 So'zlar: {k}\n📡 Guruhlar: {g}"
+        await c.message.edit_text(txt, reply_markup=main_kb(), parse_mode="HTML")
+    except: await c.answer("Userbot o'chiq!")
 
-# --- ISHGA TUSHIRISH ---
 async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
