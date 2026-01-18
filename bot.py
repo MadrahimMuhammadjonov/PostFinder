@@ -24,9 +24,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-# Jarayonni to'xtatish uchun global nazorat lug'ati
-stop_tasks = {}
-
 # --- MA'LUMOTLAR BAZASI ---
 def init_db():
     with sqlite3.connect('bot_data.db') as conn:
@@ -61,12 +58,7 @@ def sub_menu(prefix):
         [InlineKeyboardButton(text="🔙 Orqaga", callback_data='back_main')]
     ])
 
-def contact_dev_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👨‍💻 Dasturchiga bog'lanish", url=f"tg://user?id={DEV_ID}")]
-    ])
-
-# --- USERBOT ---
+# --- USERBOT LOGIKASI ---
 @client.on(events.NewMessage)
 async def handle_new_message(event):
     try:
@@ -79,13 +71,10 @@ async def handle_new_message(event):
         if found:
             sender = await event.get_sender()
             chat = await event.get_chat()
-            g_name = html.escape(getattr(chat, 'title', 'Guruh'))
-            s_name = html.escape(f"{getattr(sender, 'first_name', '')} {getattr(sender, 'last_name', '')}".strip() or "User")
             p_url = f"https://t.me/{sender.username}" if getattr(sender, 'username', None) else f"tg://user?id={sender.id}"
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👤 Profilni ochish", url=p_url)]])
             report = (f"🔍 <b>Topildi:</b> {', '.join(found)}\n"
-                      f"<b>📍 Guruh:</b> {g_name}\n"
-                      f"<b>👤 Foydalanuvchi:</b> {s_name}\n\n"
+                      f"<b>📍 Guruh:</b> {html.escape(getattr(chat, 'title', 'Guruh'))}\n\n"
                       f"<b>📝 Xabar:</b>\n<i>{html.escape(text[:800])}</i>")
             await bot.send_message(chat_id=PERSONAL_GROUP_ID, text=report, reply_markup=kb, parse_mode="HTML")
     except: pass
@@ -95,97 +84,49 @@ async def handle_new_message(event):
 async def cmd_start(message: types.Message):
     if message.from_user.id in ADMIN_LIST:
         await message.answer("🤖 <b>Asosiy boshqaruv menyusi:</b>", reply_markup=main_menu(), parse_mode="HTML")
-    else:
-        await message.answer("⚠️ <b>Admin emas!</b>", reply_markup=contact_dev_kb(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "back_main")
 async def back_main(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_LIST: return
-    stop_tasks[callback.from_user.id] = True # Har qanday jarayonni to'xtatish
     db_query("DELETE FROM user_state WHERE user_id=?", (callback.from_user.id,))
     await callback.message.edit_text("🤖 <b>Asosiy boshqaruv menyusi:</b>", reply_markup=main_menu(), parse_mode="HTML")
 
 @dp.callback_query(F.data.in_({"keyword_menu", "search_group_menu"}))
 async def show_menus(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_LIST: return
-    stop_tasks[callback.from_user.id] = True
     prefix = callback.data.replace("_menu", "")
-    await callback.message.edit_text(f"<b>{prefix.replace('_', ' ').capitalize()} bo'limi:</b>", reply_markup=sub_menu(prefix), parse_mode="HTML")
+    await callback.message.edit_text(f"<b>{prefix.capitalize()} bo'limi:</b>", reply_markup=sub_menu(prefix), parse_mode="HTML")
 
-# --- O'CHIRISH BO'LIMI ---
+# --- O'CHIRISH FUNKSIYALARI ---
 @dp.callback_query(F.data.startswith("del_menu_"))
 async def delete_menu(callback: types.CallbackQuery, target_prefix=None):
-    if callback.from_user.id not in ADMIN_LIST: return
     prefix = target_prefix if target_prefix else callback.data.replace("del_menu_", "")
-    
-    if prefix == "keyword":
-        data = db_query("SELECT id, keyword FROM keywords", fetch=True)
-        text = "🗑 <b>Kalit so'zni o'chirish:</b>"
-        back_call = "keyword_menu"
-    else:
-        data = db_query("SELECT id, group_name FROM search_groups", fetch=True)
-        text = "🗑 <b>Guruhni o'chirish:</b>"
-        back_call = "search_group_menu"
-    
+    data = db_query("SELECT id, keyword FROM keywords", fetch=True) if prefix == "keyword" else db_query("SELECT id, group_name FROM search_groups", fetch=True)
+    text = "🗑 <b>O'chirish uchun tanlang:</b>"
     kb = [[InlineKeyboardButton(text=f"❌ {item[1]}", callback_data=f"execute_del_{prefix}_{item[0]}")] for item in data]
-    kb.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data=back_call)])
+    kb.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data=f"{prefix}_menu")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("execute_del_"))
 async def execute_delete(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_LIST: return
     parts = callback.data.split("_")
     prefix, item_id = parts[2], parts[3]
-    
-    if prefix == "keyword":
-        db_query("DELETE FROM keywords WHERE id=?", (item_id,))
-    else:
-        group_res = db_query("SELECT group_id FROM search_groups WHERE id=?", (item_id,), fetch=True)
-        if group_res:
-            try: await client(functions.channels.LeaveChannelRequest(channel=group_res[0][0]))
+    if prefix == "search":
+        res = db_query("SELECT group_id FROM search_groups WHERE id=?", (item_id,), fetch=True)
+        if res:
+            try: await client(functions.channels.LeaveChannelRequest(channel=res[0][0]))
             except: pass
         db_query("DELETE FROM search_groups WHERE id=?", (item_id,))
-    
+    else:
+        db_query("DELETE FROM keywords WHERE id=?", (item_id,))
     await callback.answer("✅ O'chirildi")
     await delete_menu(callback, target_prefix=prefix)
 
-# --- GURUH QO'SHISH VA TO'XTATISH ---
-async def process_groups(user_id, message, links):
-    success, failed = 0, []
-    total = len(links)
-    stop_tasks[user_id] = False # Jarayonni boshlash
-    
-    status_msg = await message.answer(f"⏳ Qo'shish boshlandi: 0/{total}")
-    
-    for i, link in enumerate(links):
-        # Agar admin "Orqaga" yoki boshqa tugmani bossa, jarayon to'xtaydi
-        if stop_tasks.get(user_id):
-            await message.answer("🛑 Guruh qo'shish jarayoni admin tomonidan to'xtatildi.")
-            return
-
-        try:
-            clean_link = re.sub(r'/\d+$', '', link.strip().replace("https://t.me/", "").replace("@", ""))
-            entity = await client.get_entity(clean_link)
-            await client(functions.channels.JoinChannelRequest(channel=entity))
-            eid = entity.id if str(entity.id).startswith("-100") else int(f"-100{entity.id}")
-            db_query("INSERT OR IGNORE INTO search_groups (group_id, group_name) VALUES (?, ?)", (eid, entity.title))
-            success += 1
-        except Exception as e:
-            failed.append(f"{link} ({str(e)})")
-        
-        await asyncio.sleep(3)
-        try: await status_msg.edit_text(f"📊 Jarayon: {i+1}/{total}\n✅ Ok: {success}\n❌ Xato: {len(failed)}")
-        except: pass
-        
-    await message.answer(f"🏁 Yakunlandi!\n✅ Ok: {success}\n❌ Xato: {len(failed)}", reply_markup=sub_menu("search_group"), parse_mode="HTML")
-
+# --- KETMA-KET QO'SHISH FUNKSIYASI ---
 @dp.callback_query(F.data.startswith("add_"))
 async def add_start(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_LIST: return
     prefix = callback.data.replace("add_", "")
     db_query("REPLACE INTO user_state VALUES (?, ?, ?)", (callback.from_user.id, f"wait_{prefix}", ""))
-    txt = "📝 Kalit so'zlarni yuboring:" if prefix == "keyword" else "📡 Havolalarni yuboring:"
-    await callback.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Bekor qilish", callback_data=f'{prefix}_menu')]]))
+    txt = "📝 Kalit so'zlarni vergul bilan yuboring:" if prefix == "keyword" else "📡 Guruh havolasini yuboring (@guruh yoki link):\n<i>Eslatma: Ketma-ket yuboraverishingiz mumkin.</i>"
+    await callback.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Yakunlash (Orqaga)", callback_data=f'{prefix}_menu')]]), parse_mode="HTML")
 
 @dp.message(F.text)
 async def handle_input(message: types.Message):
@@ -193,39 +134,58 @@ async def handle_input(message: types.Message):
     state_res = db_query("SELECT state FROM user_state WHERE user_id=?", (message.from_user.id,), fetch=True)
     if not state_res: return
     state = state_res[0][0]
-    
+
+    # --- Kalit so'zlarni ketma-ket qo'shish ---
     if state == "wait_keyword":
         kws = [k.strip() for k in message.text.split(",") if k.strip()]
         for k in kws: db_query("INSERT OR IGNORE INTO keywords (keyword) VALUES (?)", (k,))
-        await message.answer(f"✅ {len(kws)} ta so'z qo'shildi.", reply_markup=sub_menu("keyword"))
-        db_query("DELETE FROM user_state WHERE user_id=?", (message.from_user.id,))
-        
+        await message.answer(f"✅ {len(kws)} ta so'z qo'shildi.\nYana yuboring yoki 'Orqaga' tugmasini bosing.", 
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Yakunlash", callback_data='keyword_menu')]]))
+
+    # --- Guruhlarni ketma-ket qo'shish (Siz so'ragan asosiy qism) ---
     elif state == "wait_search_group":
         links = re.findall(r'(?:https?://)?t\.me/[a-zA-Z0-9_]{4,}|@[a-zA-Z0-9_]{4,}', message.text)
-        if not links: return await message.answer("❌ Havola topilmadi!")
-        db_query("DELETE FROM user_state WHERE user_id=?", (message.from_user.id,))
-        asyncio.create_task(process_groups(message.from_user.id, message, links))
+        if not links:
+            return await message.answer("❌ Havola topilmadi! Iltimos, to'g'ri link yuboring.")
+        
+        status_msg = await message.answer("⏳ Qo'shilmoqda...")
+        success, failed = 0, []
+        
+        for link in links:
+            try:
+                clean_link = re.sub(r'/\d+$', '', link.strip().replace("https://t.me/", "").replace("@", ""))
+                entity = await client.get_entity(clean_link)
+                await client(functions.channels.JoinChannelRequest(channel=entity))
+                eid = entity.id if str(entity.id).startswith("-100") else int(f"-100{entity.id}")
+                db_query("INSERT OR IGNORE INTO search_groups (group_id, group_name) VALUES (?, ?)", (eid, entity.title))
+                success += 1
+            except Exception as e:
+                failed.append(f"{link} ({str(e)})")
+        
+        res_txt = f"✅ {success} ta guruhga ulanildi."
+        if failed: res_txt += f"\n❌ {len(failed)} ta xato."
+        
+        await status_msg.edit_text(f"{res_txt}\n\n📥 <b>Navbatdagi guruh havolasini yuboring...</b>", 
+                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Yakunlash", callback_data='search_group_menu')]]),
+                                   parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("view_"))
 async def view_list(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_LIST: return
     prefix = callback.data.replace("view_", "")
-    table = "keywords" if prefix == "keyword" else "search_groups"
     col = "keyword" if prefix == "keyword" else "group_name"
-    data = db_query(f"SELECT {col} FROM {table}", fetch=True)
-    txt = f"📋 <b>Ro'yxat:</b>\n\n" + ("\n".join([f"• {k[0]}" for k in data]) if data else "Bo'sh")
+    data = db_query(f"SELECT {col} FROM {'keywords' if prefix == 'keyword' else 'search_groups'}", fetch=True)
+    txt = f"📋 <b>Ro'yxat:</b>\n\n" + ("\n".join([f"• {k[0]}" for k in data]) if data else "Hozircha bo'sh")
     await callback.message.edit_text(txt[:4000], reply_markup=sub_menu(prefix), parse_mode="HTML")
 
 @dp.callback_query(F.data == "check_status")
 async def check_status(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_LIST: return
     try:
         me = await client.get_me()
         k_count = db_query("SELECT COUNT(*) FROM keywords", fetch=True)[0][0]
         g_count = db_query("SELECT COUNT(*) FROM search_groups", fetch=True)[0][0]
         txt = f"⚙️ <b>Holat:</b>\n👤 Userbot: @{me.username}\n🔑 So'zlar: {k_count}\n📡 Guruhlar: {g_count}"
         await callback.message.edit_text(txt, reply_markup=main_menu(), parse_mode="HTML")
-    except: await callback.answer("Xato!")
+    except: await callback.answer("Userbot o'chiq!")
 
 async def main():
     init_db()
