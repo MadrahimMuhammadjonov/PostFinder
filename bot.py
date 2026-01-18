@@ -24,6 +24,9 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
+# Jarayonni to'xtatish uchun global nazorat lug'ati
+stop_tasks = {}
+
 # --- MA'LUMOTLAR BAZASI ---
 def init_db():
     with sqlite3.connect('bot_data.db') as conn:
@@ -63,7 +66,7 @@ def contact_dev_kb():
         [InlineKeyboardButton(text="👨‍💻 Dasturchiga bog'lanish", url=f"tg://user?id={DEV_ID}")]
     ])
 
-# --- USERBOT (XABARLARNI FILTRLASH) ---
+# --- USERBOT ---
 @client.on(events.NewMessage)
 async def handle_new_message(event):
     try:
@@ -87,7 +90,7 @@ async def handle_new_message(event):
             await bot.send_message(chat_id=PERSONAL_GROUP_ID, text=report, reply_markup=kb, parse_mode="HTML")
     except: pass
 
-# --- BOT INTERFEYSI (ADMIN PANEL) ---
+# --- BOT HANDLERLARI ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id in ADMIN_LIST:
@@ -98,37 +101,33 @@ async def cmd_start(message: types.Message):
 @dp.callback_query(F.data == "back_main")
 async def back_main(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_LIST: return
+    stop_tasks[callback.from_user.id] = True # Har qanday jarayonni to'xtatish
     db_query("DELETE FROM user_state WHERE user_id=?", (callback.from_user.id,))
     await callback.message.edit_text("🤖 <b>Asosiy boshqaruv menyusi:</b>", reply_markup=main_menu(), parse_mode="HTML")
 
 @dp.callback_query(F.data.in_({"keyword_menu", "search_group_menu"}))
 async def show_menus(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_LIST: return
+    stop_tasks[callback.from_user.id] = True
     prefix = callback.data.replace("_menu", "")
     await callback.message.edit_text(f"<b>{prefix.replace('_', ' ').capitalize()} bo'limi:</b>", reply_markup=sub_menu(prefix), parse_mode="HTML")
 
-# --- O'CHIRISH FUNKSIYALARI (TO'G'IRLANGAN) ---
+# --- O'CHIRISH BO'LIMI ---
 @dp.callback_query(F.data.startswith("del_menu_"))
 async def delete_menu(callback: types.CallbackQuery, target_prefix=None):
     if callback.from_user.id not in ADMIN_LIST: return
-    
-    # Agar target_prefix berilmagan bo'lsa (birinchi marta kirish), callbackdan olamiz
     prefix = target_prefix if target_prefix else callback.data.replace("del_menu_", "")
     
     if prefix == "keyword":
         data = db_query("SELECT id, keyword FROM keywords", fetch=True)
-        text = "🗑 <b>O'chirish uchun kalit so'zni tanlang:</b>"
+        text = "🗑 <b>Kalit so'zni o'chirish:</b>"
         back_call = "keyword_menu"
     else:
         data = db_query("SELECT id, group_name FROM search_groups", fetch=True)
-        text = "🗑 <b>O'chirish uchun guruhni tanlang:</b>"
+        text = "🗑 <b>Guruhni o'chirish:</b>"
         back_call = "search_group_menu"
     
-    kb = []
-    if data:
-        for item in data:
-            kb.append([InlineKeyboardButton(text=f"❌ {item[1]}", callback_data=f"execute_del_{prefix}_{item[0]}")])
-    
+    kb = [[InlineKeyboardButton(text=f"❌ {item[1]}", callback_data=f"execute_del_{prefix}_{item[0]}")] for item in data]
     kb.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data=back_call)])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
 
@@ -136,8 +135,7 @@ async def delete_menu(callback: types.CallbackQuery, target_prefix=None):
 async def execute_delete(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_LIST: return
     parts = callback.data.split("_")
-    prefix = parts[2] # keyword yoki search
-    item_id = parts[3]
+    prefix, item_id = parts[2], parts[3]
     
     if prefix == "keyword":
         db_query("DELETE FROM keywords WHERE id=?", (item_id,))
@@ -149,23 +147,22 @@ async def execute_delete(callback: types.CallbackQuery):
         db_query("DELETE FROM search_groups WHERE id=?", (item_id,))
     
     await callback.answer("✅ O'chirildi")
-    # MUHIM: O'chirilgandan so'ng aynan o'sha prefix menyusiga qaytaramiz
     await delete_menu(callback, target_prefix=prefix)
 
-# --- QO'SHISH VA BOSHQALAR ---
-@dp.callback_query(F.data.startswith("add_"))
-async def add_start(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_LIST: return
-    prefix = callback.data.replace("add_", "")
-    db_query("REPLACE INTO user_state VALUES (?, ?, ?)", (callback.from_user.id, f"wait_{prefix}", ""))
-    txt = "📝 Kalit so'zlarni yuboring:" if prefix == "keyword" else "📡 Havolalarni yuboring:"
-    await callback.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Bekor qilish", callback_data=f'{prefix}_menu')]]))
-
-async def process_groups(message, links):
+# --- GURUH QO'SHISH VA TO'XTATISH ---
+async def process_groups(user_id, message, links):
     success, failed = 0, []
     total = len(links)
-    status_msg = await message.answer(f"⏳ Jarayon boshlandi...")
+    stop_tasks[user_id] = False # Jarayonni boshlash
+    
+    status_msg = await message.answer(f"⏳ Qo'shish boshlandi: 0/{total}")
+    
     for i, link in enumerate(links):
+        # Agar admin "Orqaga" yoki boshqa tugmani bossa, jarayon to'xtaydi
+        if stop_tasks.get(user_id):
+            await message.answer("🛑 Guruh qo'shish jarayoni admin tomonidan to'xtatildi.")
+            return
+
         try:
             clean_link = re.sub(r'/\d+$', '', link.strip().replace("https://t.me/", "").replace("@", ""))
             entity = await client.get_entity(clean_link)
@@ -175,10 +172,20 @@ async def process_groups(message, links):
             success += 1
         except Exception as e:
             failed.append(f"{link} ({str(e)})")
+        
         await asyncio.sleep(3)
         try: await status_msg.edit_text(f"📊 Jarayon: {i+1}/{total}\n✅ Ok: {success}\n❌ Xato: {len(failed)}")
         except: pass
-    await message.answer(f"🏁 Tugadi!\n✅ Ok: {success}\n❌ Xato: {len(failed)}", reply_markup=sub_menu("search_group"), parse_mode="HTML")
+        
+    await message.answer(f"🏁 Yakunlandi!\n✅ Ok: {success}\n❌ Xato: {len(failed)}", reply_markup=sub_menu("search_group"), parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("add_"))
+async def add_start(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_LIST: return
+    prefix = callback.data.replace("add_", "")
+    db_query("REPLACE INTO user_state VALUES (?, ?, ?)", (callback.from_user.id, f"wait_{prefix}", ""))
+    txt = "📝 Kalit so'zlarni yuboring:" if prefix == "keyword" else "📡 Havolalarni yuboring:"
+    await callback.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Bekor qilish", callback_data=f'{prefix}_menu')]]))
 
 @dp.message(F.text)
 async def handle_input(message: types.Message):
@@ -186,16 +193,18 @@ async def handle_input(message: types.Message):
     state_res = db_query("SELECT state FROM user_state WHERE user_id=?", (message.from_user.id,), fetch=True)
     if not state_res: return
     state = state_res[0][0]
+    
     if state == "wait_keyword":
         kws = [k.strip() for k in message.text.split(",") if k.strip()]
         for k in kws: db_query("INSERT OR IGNORE INTO keywords (keyword) VALUES (?)", (k,))
         await message.answer(f"✅ {len(kws)} ta so'z qo'shildi.", reply_markup=sub_menu("keyword"))
         db_query("DELETE FROM user_state WHERE user_id=?", (message.from_user.id,))
+        
     elif state == "wait_search_group":
         links = re.findall(r'(?:https?://)?t\.me/[a-zA-Z0-9_]{4,}|@[a-zA-Z0-9_]{4,}', message.text)
-        if not links: return await message.answer("❌ Havola xato!")
+        if not links: return await message.answer("❌ Havola topilmadi!")
         db_query("DELETE FROM user_state WHERE user_id=?", (message.from_user.id,))
-        asyncio.create_task(process_groups(message, links))
+        asyncio.create_task(process_groups(message.from_user.id, message, links))
 
 @dp.callback_query(F.data.startswith("view_"))
 async def view_list(callback: types.CallbackQuery):
