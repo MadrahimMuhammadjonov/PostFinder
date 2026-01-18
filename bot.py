@@ -22,7 +22,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-# --- DATABASE ---
+# --- DATABASE FUNKSIYALARI ---
 def init_db():
     with sqlite3.connect('bot_data.db') as conn:
         c = conn.cursor()
@@ -40,7 +40,7 @@ def db_query(query, params=(), fetch=False):
         conn.commit()
         return res
 
-# --- KEYBOARDS ---
+# --- KLAVIATURALAR ---
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔑 Kalit so'zlar", callback_data='keyword_menu')],
@@ -59,7 +59,12 @@ def sub_menu(prefix):
 def cancel_btn(prefix):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Bekor qilish", callback_data=f'{prefix}_menu')]])
 
-# --- USERBOT HANDLER ---
+def guest_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👨‍💻 Adminga bog'lanish", url=f"tg://user?id={ADMIN_ID}")]
+    ])
+
+# --- USERBOT (XABARLARNI TUTISH) ---
 @client.on(events.NewMessage)
 async def handle_new_message(event):
     try:
@@ -76,68 +81,82 @@ async def handle_new_message(event):
             if not res: return
             
             sender = await event.get_sender()
-            s_name = html.escape(f"{sender.first_name or ''} {sender.last_name or ''}".strip() or "User")
+            chat = await event.get_chat()
+            g_name = html.escape(getattr(chat, 'title', 'Nomaʼlum guruh'))
+            s_name = html.escape(f"{sender.first_name or ''} {sender.last_name or ''}".strip() or "Foydalanuvchi")
             p_url = f"https://t.me/{sender.username}" if sender.username else f"tg://user?id={sender.id}"
             
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👤 Profilga o'tish", url=p_url)]])
-            report = f"🔍 <b>Topildi:</b> {', '.join(found)}\n<b>👤 User:</b> {s_name}\n\n<b>📝 Xabar:</b>\n<i>{html.escape(text[:800])}</i>"
+            report = (f"🔍 <b>Kalit so'z topildi:</b> {', '.join(found)}\n"
+                      f"<b>📍 Guruh:</b> {g_name}\n"
+                      f"<b>👤 Foydalanuvchi:</b> {s_name}\n\n"
+                      f"<b>📝 Xabar:</b>\n<i>{html.escape(text[:800])}</i>")
+            
             await bot.send_message(chat_id=int(res[0][0]), text=report, reply_markup=kb, parse_mode="HTML")
     except: pass
 
-# --- BOT COMMANDS ---
+# --- BOT HANDLERLARI ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("🤖 <b>Boshqaruv paneli:</b>", reply_markup=main_menu(), parse_mode="HTML")
+        await message.answer(f"👋 Salom Admin!\n🤖 <b>Boshqaruv paneli:</b>", reply_markup=main_menu(), parse_mode="HTML")
+    else:
+        await message.answer(
+            "👋 Salom!\n\n⚠️ <b>Ushbu botdan faqat adminlar foydalana oladi.</b>\nBotga kirish ruxsatnomasi yo'q.",
+            reply_markup=guest_kb(),
+            parse_mode="HTML"
+        )
 
 @dp.callback_query(F.data == "back_main")
 async def back_main(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
     db_query("DELETE FROM user_state WHERE user_id=?", (callback.from_user.id,))
-    await callback.message.edit_text("🤖 <b>Boshqaruv paneli:</b>", reply_markup=main_menu(), parse_mode="HTML")
+    await callback.message.edit_text("🤖 <b>Asosiy boshqaruv menyusi:</b>", reply_markup=main_menu(), parse_mode="HTML")
 
-# --- MENUS ---
 @dp.callback_query(F.data.in_({"keyword_menu", "search_group_menu", "personal_group_menu"}))
 async def show_menus(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
     prefix = callback.data.replace("_menu", "")
     titles = {"keyword": "🔑 Kalit so'zlar", "search_group": "📡 Izlovchi guruhlar", "personal_group": "📢 Shaxsiy guruh"}
     await callback.message.edit_text(f"<b>{titles[prefix]} boshqaruvi:</b>", reply_markup=sub_menu(prefix), parse_mode="HTML")
 
-# --- ADD ACTIONS ---
 @dp.callback_query(F.data.startswith("add_"))
 async def add_start(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
     prefix = callback.data.replace("add_", "")
     db_query("REPLACE INTO user_state VALUES (?, ?, ?)", (callback.from_user.id, f"wait_{prefix}", ""))
     txt = "📝 Kalit so'zlarni vergul bilan yuboring (max 1000):" if prefix == "keyword" else "📡 Link yoki ID yuboring:"
     await callback.message.edit_text(txt, reply_markup=cancel_btn(prefix))
 
-# --- VIEW ACTIONS ---
 @dp.callback_query(F.data.startswith("view_"))
 async def view_list(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
     prefix = callback.data.replace("view_", "")
     if prefix == "keyword":
         data = db_query("SELECT keyword FROM keywords", fetch=True)
-        txt = "📋 <b>So'zlar:</b>\n\n" + ("\n".join([f"• {k[0]}" for k in data]) if data else "Bo'sh")
+        txt = "📋 <b>Saqlangan so'zlar:</b>\n\n" + ("\n".join([f"• {k[0]}" for k in data]) if data else "Ro'yxat bo'sh")
     elif prefix == "search_group":
         data = db_query("SELECT group_name FROM search_groups", fetch=True)
-        txt = "📋 <b>Guruhlar:</b>\n\n" + ("\n".join([f"• {g[0]}" for g in data]) if data else "Bo'sh")
+        txt = "📋 <b>Kuzatilayotgan guruhlar:</b>\n\n" + ("\n".join([f"• {g[0]}" for g in data]) if data else "Guruhlar qo'shilmagan")
     else:
         res = db_query("SELECT value FROM settings WHERE key='personal_group_id'", fetch=True)
-        txt = f"📢 <b>Shaxsiy guruh ID:</b> <code>{res[0][0]}</code>" if res else "O'rnatilmagan"
+        txt = f"📢 <b>Hozirgi shaxsiy guruh ID:</b> <code>{res[0][0]}</code>" if res else "Shaxsiy guruh o'rnatilmagan"
     await callback.message.edit_text(txt, reply_markup=sub_menu(prefix), parse_mode="HTML")
 
-# --- DELETE MENUS ---
 @dp.callback_query(F.data.startswith("del_menu_"))
-async def delete_menu(callback: types.CallbackQuery):
+async def delete_menu_call(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
     prefix = callback.data.replace("del_menu_", "")
     if prefix == "personal_group":
         db_query("DELETE FROM settings WHERE key='personal_group_id'")
-        return await callback.answer("🗑 O'chirildi", show_alert=True) or await show_menus(callback)
+        await callback.answer("🗑 Shaxsiy guruh o'chirildi", show_alert=True)
+        return await show_menus(callback)
     
     table = "keywords" if prefix == "keyword" else "search_groups"
     col = "keyword" if prefix == "keyword" else "group_name, group_id"
     data = db_query(f"SELECT {col} FROM {table}", fetch=True)
     
-    if not data: return await callback.answer("Ro'yxat bo'sh", show_alert=True)
+    if not data: return await callback.answer("Ro'yxat bo'sh!", show_alert=True)
     
     kb = []
     for item in data:
@@ -150,13 +169,14 @@ async def delete_menu(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith(("rm_kw_", "rm_sg_")))
 async def delete_action(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
     if callback.data.startswith("rm_kw_"):
         db_query("DELETE FROM keywords WHERE keyword=?", (callback.data[6:],))
         prefix = "keyword"
     else:
         db_query("DELETE FROM search_groups WHERE group_id=?", (callback.data[6:],))
         prefix = "search_group"
-    await delete_menu(callback)
+    await delete_menu_call(callback)
 
 # --- INPUT HANDLER ---
 @dp.message(F.text)
@@ -169,6 +189,7 @@ async def handle_input(message: types.Message):
     try:
         if state == "wait_keyword":
             kws = [k.strip() for k in message.text.split(",") if k.strip()][:1000]
+            if not kws: raise Exception("Hech qanday so'z kiritilmadi")
             for k in kws: db_query("INSERT OR IGNORE INTO keywords (keyword) VALUES (?)", (k,))
             await message.answer(f"✅ {len(kws)} ta so'z qo'shildi", reply_markup=sub_menu("keyword"))
             db_query("DELETE FROM user_state WHERE user_id=?", (message.from_user.id,))
@@ -183,11 +204,11 @@ async def handle_input(message: types.Message):
                 await message.answer(f"✅ {entity.title} qo'shildi", reply_markup=sub_menu("search_group"))
             else:
                 db_query("REPLACE INTO settings (key, value) VALUES ('personal_group_id', ?)", (str(eid),))
-                await message.answer(f"✅ Shaxsiy guruh: {entity.title}", reply_markup=sub_menu("personal_group"))
+                await message.answer(f"✅ Shaxsiy guruh o'rnatildi: {entity.title}", reply_markup=sub_menu("personal_group"))
             db_query("DELETE FROM user_state WHERE user_id=?", (message.from_user.id,))
             
     except Exception as e:
-        await message.answer(f"❌ Xato: {str(e)}\n\nQayta urinib ko'ring:")
+        await message.answer(f"❌ Xato: {str(e)}\n\nIltimos, qayta urinib ko'ring yoki linkni tekshiring:")
 
 # --- START ---
 async def main():
